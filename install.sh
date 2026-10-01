@@ -1015,6 +1015,23 @@ dump_user_service_gateway_diagnostics() {
   fi
 }
 
+local_gateway_user_service_failed() {
+  [ "${PLATFORM:-}" = "linux" ] || return 1
+  [ "${LINUX_INSTALL_METHOD:-}" != "snap" ] || return 1
+
+  _active_state="$(as_target_user systemctl --user show openshell-gateway --property=ActiveState --value 2>/dev/null)" || return 1
+  _sub_state="$(as_target_user systemctl --user show openshell-gateway --property=SubState --value 2>/dev/null)" || return 1
+
+  case "${_active_state}:${_sub_state}" in
+    failed:*|activating:auto-restart)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 wait_for_local_gateway_listener() {
   _timeout="${OPENSHELL_INSTALL_GATEWAY_TIMEOUT:-30}"
   _elapsed=0
@@ -1029,6 +1046,11 @@ wait_for_local_gateway_listener() {
     elif _last_output="$(as_target_user curl -sS --max-time 2 --cacert "${_mtls_dir}/ca.crt" --cert "${_mtls_dir}/tls.crt" --key "${_mtls_dir}/tls.key" -o /dev/null "$_probe_url" 2>&1)"; then
       info "local gateway listener is reachable"
       return 0
+    fi
+    if local_gateway_user_service_failed; then
+      [ -z "$_last_output" ] || printf '%s\\n' "$_last_output" >&2
+      dump_local_gateway_diagnostics
+      error "openshell-gateway user service failed during startup; retry with: systemctl --user restart openshell-gateway"
     fi
     sleep 1
     _elapsed=$((_elapsed + 1))

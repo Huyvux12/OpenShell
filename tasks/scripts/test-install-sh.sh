@@ -549,6 +549,76 @@ if [ "$(PLATFORM=linux local_gateway_endpoint)" != "https://127.0.0.1:17670" ]; 
   exit 1
 fi
 
+assert_user_gateway_service_failure_state() {
+  local name=$1
+  local active_state=$2
+  local sub_state=$3
+  local expected=$4
+  local actual=0
+
+  if (
+    PLATFORM=linux
+    LINUX_INSTALL_METHOD=deb
+    as_target_user() {
+      case "$*" in
+        "systemctl --user show openshell-gateway --property=ActiveState --value")
+          printf '%s\\n' "$active_state"
+          ;;
+        "systemctl --user show openshell-gateway --property=SubState --value")
+          printf '%s\\n' "$sub_state"
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+    }
+    local_gateway_user_service_failed
+  ); then
+    actual=1
+  fi
+
+  if [ "$actual" != "$expected" ]; then
+    echo "FAIL: ${name}: expected ${expected}, got ${actual}" >&2
+    exit 1
+  fi
+}
+
+assert_user_gateway_service_failure_state "failed user gateway service aborts readiness wait" failed failed 1
+assert_user_gateway_service_failure_state "auto-restarting user gateway service aborts readiness wait" activating auto-restart 1
+assert_user_gateway_service_failure_state "starting user gateway service keeps waiting" activating start 0
+assert_user_gateway_service_failure_state "running user gateway service keeps waiting" active running 0
+
+service_failure_sleep_log="${tmpdir}/service-failure-sleep"
+: >"$service_failure_sleep_log"
+if (
+  PLATFORM=linux
+  LINUX_INSTALL_METHOD=deb
+  TARGET_HOME="${tmpdir}/missing-gateway-home"
+  OPENSHELL_INSTALL_GATEWAY_TIMEOUT=30
+  local_gateway_endpoint() { printf 'https://127.0.0.1:17670'; }
+  local_gateway_user_service_failed() { return 0; }
+  dump_local_gateway_diagnostics() { printf 'mock gateway diagnostics\\n' >&2; }
+  sleep() { printf 'sleep\\n' >>"$service_failure_sleep_log"; }
+  wait_for_local_gateway_listener
+) >"$out" 2>"$err"; then
+  echo "FAIL: failed user gateway service should stop listener wait" >&2
+  exit 1
+fi
+if ! grep -Fq "mock gateway diagnostics" "$err"; then
+  echo "FAIL: failed user gateway service must dump diagnostics" >&2
+  cat "$err" >&2 || true
+  exit 1
+fi
+if ! grep -Fq "openshell-gateway user service failed during startup; retry with: systemctl --user restart openshell-gateway" "$err"; then
+  echo "FAIL: failed user gateway service must print actionable retry guidance" >&2
+  cat "$err" >&2 || true
+  exit 1
+fi
+if [ -s "$service_failure_sleep_log" ]; then
+  echo "FAIL: failed user gateway service must stop before the next readiness sleep" >&2
+  exit 1
+fi
+
 cat >"${tmpdir}/checksums" <<'EOF'
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  openshell-dev-x86_64.rpm
 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  openshell-gateway-dev-x86_64.rpm
